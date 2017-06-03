@@ -1,5 +1,9 @@
-import asyncio
+from .errors import *
+from requests import Session, codes
+from os.path import isfile
+import time
 import json
+import asyncio
 import websockets
 import collections
 
@@ -11,8 +15,8 @@ class Call:
     def __init__(self, connection, payload):
         """
         A Call is an incoming message from the Interactive service.
-        :param connection: the connection 
-        :param payload: 
+        :param connection: the connection
+        :param payload:
         """
         self._connection = connection
         self._payload = payload
@@ -53,7 +57,6 @@ class Connection:
     The Connection is used to connect to the Interactive server. It connects
     to a provided socket address and provides an interface for making RPC
     calls. Example usage::
-
         connection = Connection(
             address=get_interactive_address(),
             authorization="Bearer {}".format(my_oauth_token),
@@ -205,13 +208,11 @@ class Connection:
     async def set_compression(self, scheme):
         """Updates the compression used on the websocket this should be
         called with an instance of the Encoding class, for example::
-
             connection.set_compression(GzipEncoding())
-
         You can, optionally, await on the resolution of method, though
         doing so it not at all required. Returns True if the server agreed
         on and executed the switch.
-        
+
         :param scheme: The compression scheme to use
         :type scheme: Encoding
         :return: Whether the upgrade was successful
@@ -228,7 +229,7 @@ class Connection:
         """
         Sends a reply for a packet id. Either the result or error should
         be fulfilled.
-        
+
         :param call_id: The ID of the call being replied to.
         :type call_id: int
         :param result: The successful result of the call.
@@ -248,7 +249,7 @@ class Connection:
         is false, we'll wait for a response before returning, up to the
         timeout duration in seconds, at which point it raises an
         asyncio.TimeoutError. If the timeout is None, we'll wait forever.
-        
+
         :param method: Method name to call
         :type method: str
         :param params: Parameters to insert into the method, generally a dict.
@@ -289,10 +290,9 @@ class Connection:
         """
         Synchronously reads a packet from the connection. Returns None if
         there are no more packets in the queue. Example::
-
             while await connection.has_packet():
-                dispatch_call(connection.get_packet()) 
-        
+                dispatch_call(connection.get_packet())
+
         :rtype: Call
         """
         if len(self._recv_queue) > 0:
@@ -304,10 +304,9 @@ class Connection:
         """
         Blocks until a packet is read. Returns true if a packet is then
         available, or false if the connection is subsequently closed. Example::
-
             while await connection.has_packet():
                 dispatch_call(connection.get_packet())
-        
+
         :rtype: bool
         """
         if len(self._recv_queue) > 0:
@@ -322,3 +321,142 @@ class Connection:
         """Closes the socket connection gracefully"""
         self._recv_task.cancel()
         await self._socket.close()
+
+
+class Auth:
+
+    def __init__(self, config=None, client_id=None,
+                 auth_conf_filename=None, client_secret=None):
+        super().__init__()
+        if config == None:
+            self.client_id = client_id
+            self.auth_conf_filename = auth_conf_filename
+            self.client_secret = client_secret
+        else:
+            self.client_id = config.client_id
+            self.auth_conf_filename = config.auth_conf_filename
+            self.client_secret = config.client_secret
+
+        self.url_base = "https://mixer.com/api/v1/"
+
+        self.oauth_info = self.read_oauth()
+
+
+    def read_oauth(self):
+        """
+        Reads the authorization keys from the authorization config file defined in config
+
+        :return:
+        Returns dict
+        """
+        if isfile(self.auth_conf_filename):
+            try:
+                with open(self.auth_conf_filename, "r") as f:
+                    return json.loads(f.read())
+            except Exception as e:
+                print("Something terribly wrong has happened when trying to read auth file. ERROR TYPE: {}\nResetting Authorization configuration.".format(type(e)))
+                return None
+        else:
+            return None
+
+    def write_oauth(self):
+        """
+        Writes authorization keys (json) to the authorization config file.
+
+        """
+        try:
+            with open(self.auth_conf_filename, "w") as f:
+                f.write(json.dumps(self.oauth_info))
+        except Exception as e:
+            print(
+                "Something terribly wrong has happened when trying to write the auth file. ERROR TYPE: {}".format(type(e)))
+            raise e
+
+    def _join(self, endpoint):
+        """
+        Generates URL for the API.
+
+        :param endpoint:
+        The endpoint URI
+
+        :return:
+        Returns the full URL.
+        """
+        return self.url_base + endpoint
+
+    def authenticate(self):
+        """
+        This should be called before your main code. This method authorizes the client via shortcode if the
+        client doesn't already have the correct auth keys.  Uses the refresh token to generate a new auth key
+        when called.
+
+        OAuth tokens are held in self.oauth_info.
+        """
+        session = Session()
+
+        if self.oauth_info is None:
+            d = {
+                "client_id": self.client_id,
+                "scope": "interactive:robot:self",
+                "client_secret":  self.client_secret
+            }
+
+            response = session.post(self._join("oauth/shortcode"), data=d)
+            if response.status_code == 200:
+                response = response.json()
+                shortcode = response["code"]
+                handle = response["handle"]
+                print("Shortcode is {} please enter this code at https://mixer.com/go".format(shortcode))
+
+                response = session.get(self._join("oauth/shortcode/check/{}".format(handle)))
+                while(response.status_code != 404):
+                    if response.status_code == 200:
+                        break
+                    elif response.status_code == 403:
+                        raise UnknownError(response.content)
+                    else:
+                        time.sleep(2.5)
+                    response = session.get(self._join("oauth/shortcode/check/{}".format(handle)))
+
+                if response.status_code == 404:
+                    print("Shortcode token expired. Try again.")
+                    raise UnknownError("Time expired.")
+
+                code = response.json()["code"]
+
+                d = {
+                    "grant_type": "authorization_code",
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                    "code": code
+                }
+                response = session.post(self._join("oauth/token"), data=d)
+
+                if response.status_code == 200:
+                    print("Success!")
+                    self.oauth_info = response.json()
+                    self.write_oauth()
+                else:
+                    print("Authorization failed when grabbing token. STATUS CODE: " + str(response.status_code))
+                    raise RequestError(response.json())
+            else:
+                print("Authorization failed during shortcode generation. STATUS CODE: " + str(response.status_code))
+                raise RequestError(response.json())
+        else:
+            d = {
+                "grant_type": "refresh_token",
+                "refresh_token": self.oauth_info["refresh_token"],
+                "client_id": self.client_id,
+                "client_secret": self.client_secret
+            }
+
+            response = session.post(self._join("oauth/token"), data=d)
+
+            if response.status_code == 200:
+                print("Refresh token used successfully and access token has been updated.")
+                self.oauth_info = response.json()
+                self.write_oauth()
+            else:
+                print("Refresh token failed somehow. Resetting authorization config.")
+                self.oauth_info = None
+                self.authenticate()

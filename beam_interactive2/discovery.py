@@ -7,7 +7,7 @@ class Discovery:
     """Discovery is a simple service discovery class which retrieves an
     Interactive host to connect to.
     """
-    def __init__(self, host='https://beam.pro',
+    def __init__(self, host='https://mixer.com',
                  path='/api/v1/interactive/hosts', timeout=10):
         self._host = host
         self._path = path

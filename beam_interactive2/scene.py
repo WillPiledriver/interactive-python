@@ -19,8 +19,8 @@ class Scene(Resource):
         super(Scene, self).__init__(scene_id, id_property='sceneID')
         self._controls = {}
         self._control_kinds = {
-            'button': ButtonControl,
-            'joystick': JoystickControl,
+            'button': Button,
+            'joystick': Joystick,
         }
 
         if len(kwargs) > 0:
