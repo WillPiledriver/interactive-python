@@ -397,7 +397,7 @@ class Auth:
         return self.url_base + endpoint
 
     def authenticate(self):
-        #TODO: Don't use refresh token if access_token is good.
+        # TODO: Use Implicit flow by passing response_type=token
         """
         This should be called before your main code. This method authorizes the client via shortcode if the
         client doesn't already have the correct auth keys.  Uses the refresh token to generate a new auth key

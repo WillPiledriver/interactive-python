@@ -165,7 +165,7 @@ class State(EventEmitter):
         packet = await self._connection.call("getScenes")
         scenes = packet["scenes"]
         for scene in scenes:
-            sceneID = scene.remove("sceneID")
+            sceneID = scene.pop("sceneID")
             self._scenes[sceneID] = scene
 
     async def cooldown(self, sceneID, controlIDs, cooldown):
