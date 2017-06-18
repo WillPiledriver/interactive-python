@@ -1,5 +1,6 @@
 import collections
 import asyncio
+import time
 from pyee import EventEmitter
 
 from .connection import Call, Connection
@@ -48,13 +49,18 @@ class State(EventEmitter):
         self._connection = connection
         self._enable_event_queue = True
         self._event_queue = collections.deque()
+        self.participants = {}
+        self.time_offset = 0
 
+        self.on('onParticipantJoin', self._on_participant_join)
+        self.on('onParticipantLeave', self._on_participant_leave)
         self.on('onSceneCreate', self._on_scene_create_or_update)
         self.on('onSceneUpdate', self._on_scene_create_or_update)
         self.on('onSceneDelete', self._on_scene_delete)
         self.on('onControlCreate', self._on_control_update_or_create)
-        self.on('onControlUpdate', self._on_control_update_or_create)
+        #self.on('onControlUpdate', self._on_control_update_or_create)
         self.on('onControlDelete', self._on_control_delete)
+        #self.on('giveInput', self._give_input)
 
     @property
     def scenes(self):
@@ -62,6 +68,46 @@ class State(EventEmitter):
         :rtype: (dict of str: Scene)
         """
         return self._scenes
+
+    def calc_time(self):
+        """
+        Calculates the servers clock as a milliseconds UTC unix timestamp.
+        :return: int milliseconds
+        """
+        return int(time.time() * 1000 + self.time_offset)
+
+
+    async def sync_time(self):
+        """
+        Synchronizes server time with local time by storing the difference in self.time_offset.
+        """
+        t = await self._connection.call("getTime")
+        t = t["time"]
+        self.time_offset = t - (time.time() * 1000)
+
+    def _give_input(self, call):
+        packet = call.data
+        username = self.participants[packet["participantID"]]["username"]
+        print("<{}> {}'ed {}".format(username, packet["input"]["event"], packet["input"]["controlID"]))
+
+
+    def _on_participant_join(self, call):
+        packet = call.data
+        for participant in packet["participants"]:
+            sessionID = participant["sessionID"]
+            del participant["sessionID"]
+            self.participants[sessionID] = participant
+        names = [p["username"] for p in packet["participants"]]
+        print("[{}] joined".format(", ".join(names)))
+
+
+    def _on_participant_leave(self, call):
+        packet = call.data
+        for participant in packet["participants"]:
+            del self.participants[participant["sessionID"]]
+
+        names = [p["username"] for p in packet["participants"]]
+        print("[{}] left".format(", ".join(names)))
 
     def pump_async(self, loop=asyncio.get_event_loop()):
         """
@@ -110,6 +156,54 @@ class State(EventEmitter):
                 self._event_queue.append(call)
 
         return self._event_queue
+
+    async def get_scenes(self):
+        """
+        calls getScenes and stores the scenes in an easily accessible list. It is stored in self._scenes.
+        Scenes can be accessed like self._scenes["default"]
+        """
+        packet = await self._connection.call("getScenes")
+        scenes = packet["scenes"]
+        for scene in scenes:
+            sceneID = scene.remove("sceneID")
+            self._scenes[sceneID] = scene
+
+    async def cooldown(self, sceneID, controlIDs, cooldown):
+        """
+        Triggers a cooldown for a list of control IDs.
+
+        :param sceneID: str scene ID
+        :param controlIDs: list of the controlIDs to cooldown
+        :param cooldown:  cooldown time in seconds
+        """
+        await self.get_scenes()
+        temp = []
+        for control in controlIDs:
+            for c in self._scenes[sceneID]["controls"]:
+                if c["controlID"] == control:
+                    c["cooldown"] = int(self.calc_time() + (cooldown * 1000))
+                    temp.append(c)
+
+        await self._connection.call("updateControls",
+                                    params={"sceneID": sceneID, "controls": temp})
+
+    async def apply_keycodes(self, sceneID, control_keycodes):
+        """
+        Applies keycodes to given controls. <Server does not currently accept this control update>
+        :param sceneID: str Scene ID
+        :param control_keycodes: A dict in the form of {"controlID": keycode (chr or int)}
+        """
+        await self.get_scenes()
+        temp = []
+        for controlID, keycode in control_keycodes.items():
+            if type(keycode) == chr:
+                keycode = ord(keycode)
+            for c in self._scenes[sceneID]["controls"]:
+                if c["controlID"] == controlID:
+                    c["keyCode"] = keycode
+                    temp.append(c)
+        await self._connection.call("updateControls",
+                                    params={"sceneID": sceneID, "controls": temp})
 
     async def create_scenes(self, *scenes):
         """

@@ -95,7 +95,6 @@ class Scene(Resource):
 
             self._controls[update['controlID']]._apply_changes(update, call)
 
-
 class Control(Resource):
     """
     Control is a structure on which participants in interactive provide input.
@@ -153,7 +152,7 @@ class Button(Control):
 
 class Joystick(Control):
     def __init__(self, control_id, **kwargs):
-        super(Button, self).__init__(
+        super(Joystick, self).__init__(
             control_id,
             data_props=['kind', 'sampleRate', 'angle', 'intensity', 'disabled'],
         )

@@ -1,5 +1,5 @@
 from .errors import *
-from requests import Session, codes
+from requests import Session
 from os.path import isfile
 import time
 import json
@@ -37,19 +37,19 @@ class Call:
         """
         return self._payload['params']
 
-    def reply_error(self, result):
+    async def reply_error(self, result):
         """
         Submits a successful reply for the call.
         :param result: The result to send to tetrisd
         """
-        self._connection.reply(self._id, result=result)
+        await self._connection.reply(self._id, result=result)
 
-    def reply_error(self, error):
+    async def reply_error(self, error):
         """
         Submits an errorful reply for the call.
         :param error: The error to send to tetrisd
         """
-        self._connection.reply(self._id, error=error)
+        await self._connection.reply(self._id, error=error)
 
 
 class Connection:
@@ -88,6 +88,7 @@ class Connection:
         self._recv_queue = collections.deque()
         self._recv_await = None
         self._recv_task = None
+        self.print_packets = False
 
     async def connect(self):
         """
@@ -105,6 +106,7 @@ class Connection:
         while True:
             packet = await self._read_single()
             if packet['type'] == 'method' and packet['method'] == 'hello':
+                print("Handshake successful!")
                 break
 
             self._recv_queue.append(packet)
@@ -155,9 +157,15 @@ class Connection:
 
         if data['type'] == 'reply':
             if data['id'] in self._awaiting_replies:
-                self._awaiting_replies[data['id']]. \
-                    set_result(data['result'])
-                del self._awaiting_replies[data['id']]
+                if "error" in data:
+                    print("There was an error: {}".format(json.dumps(data)))
+                    self._awaiting_replies[data['id']]. \
+                        set_result("error")
+                    del self._awaiting_replies[data['id']]
+                else:
+                    self._awaiting_replies[data['id']]. \
+                        set_result(data['result'])
+                    del self._awaiting_replies[data['id']]
 
             return
 
@@ -166,11 +174,14 @@ class Connection:
             self._recv_await.set_result(True)
             self._recv_await = None
 
-    def _send(self, payload):
+    async def _send(self, payload):
         """
         Encodes and sends a dict payload.
         """
-        self._socket.send(self._encode(json.dumps(payload)))
+        j = json.dumps(payload)
+        if self.print_packets:
+            print("SENT [{}]: {}".format(self._encoding.name(), j))
+        await self._socket.send(j)
 
     async def _read_single(self):
         """
@@ -178,6 +189,8 @@ class Connection:
         """
         try:
             raw_data = await self._socket.recv()
+            if self.print_packets:
+                print("RCV: {}".format(raw_data))
         except (asyncio.CancelledError, websockets.ConnectionClosed) as e:
             if self._recv_await is None:
                 self._recv_await = asyncio.Future(loop=self._loop)
@@ -225,7 +238,7 @@ class Connection:
 
         return False
 
-    def reply(self, call_id, result=None, error=None):
+    async def reply(self, call_id, result=None, error=None):
         """
         Sends a reply for a packet id. Either the result or error should
         be fulfilled.
@@ -241,9 +254,9 @@ class Connection:
         if error is not None:
             packet['error'] = result
 
-        self._send(packet)
+        await self._send(packet)
 
-    async def call(self, method, params, discard=False, timeout=10):
+    async def call(self, method, params={}, discard=False, timeout=10):
         """
         Sends a method call to the interactive socket. If discard
         is false, we'll wait for a response before returning, up to the
@@ -263,25 +276,24 @@ class Connection:
 
         packet = {
             'type': 'method',
+            'id': self._call_counter,
             'method': method,
             'params': params,
-            'id': self._call_counter,
+            'discard': discard
         }
 
-        if discard:
-            packet['discard'] = True
-
         self._call_counter += 1
-        self._send(packet)
+        await self._send(packet)
 
         if discard:
             return None
 
         future = asyncio.Future(loop=self._loop)
+
         self._awaiting_replies[packet['id']] = future
 
         try:
-            return await asyncio.wait_for(future, timeout, loop=self._loop)
+            return await asyncio.wait_for(self._awaiting_replies[packet['id']], timeout, loop=self._loop)
         except Exception as e:
             del self._awaiting_replies[packet['id']]
             raise e
@@ -327,7 +339,7 @@ class Auth:
 
     def __init__(self, config=None, client_id=None,
                  auth_conf_filename=None, client_secret=None):
-        super().__init__()
+        super(Auth, self).__init__()
         if config == None:
             self.client_id = client_id
             self.auth_conf_filename = auth_conf_filename
@@ -385,6 +397,7 @@ class Auth:
         return self.url_base + endpoint
 
     def authenticate(self):
+        #TODO: Don't use refresh token if access_token is good.
         """
         This should be called before your main code. This method authorizes the client via shortcode if the
         client doesn't already have the correct auth keys.  Uses the refresh token to generate a new auth key
@@ -433,7 +446,7 @@ class Auth:
                 response = session.post(self._join("oauth/token"), data=d)
 
                 if response.status_code == 200:
-                    print("Success!")
+                    print("Authorization successful.")
                     self.oauth_info = response.json()
                     self.write_oauth()
                 else:

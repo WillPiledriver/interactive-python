@@ -60,3 +60,7 @@ target/
 
 /.idea
 *.iml
+test.py
+config.py
+*.wav
+auth.conf
