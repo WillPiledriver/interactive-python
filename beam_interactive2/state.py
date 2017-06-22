@@ -15,27 +15,27 @@ class State(EventEmitter):
         connection = State.connect(
             project_version_id=my_version_id,
             authorization="Bearer " + oauth_token)
-    
+
     The state can work in two modes for handling delivery of events and updates.
     You can use `pump()` calls synchronously within your game loop to apply
     updates that have been queued. Alternately, you can call `pump_async()` to
     signal to that state that you want updates delivered asynchronously, as soon
     as they come in. For example:
-    
+
         # Async delivery. `giveInput` is emitted as soon as any input comes in.
         state.on('giveInput', lambda call: do_the_thing(call))
         state.pump_async()
-        
+
         # Sync delivery. `giveInput` is emitted only during calls to pump()
         state.on('giveInput', lambda call: do_the_thing(call))
         while True:
             my_game_loop.tick()
             state.pump()
-            
+
             # You can also read queues of changes from pump(), if you prefer
-            # to dispatch changes manually: 
+            # to dispatch changes manually:
             # for call in pump(): ...
-    
+
     In both modes, all incoming call are emitted as events on the State
     instance.
 
@@ -51,15 +51,11 @@ class State(EventEmitter):
         self._event_queue = collections.deque()
         self.participants = {}
         self.time_offset = 0
-
+        self._controls = {}
         self.on('onParticipantJoin', self._on_participant_join)
         self.on('onParticipantLeave', self._on_participant_leave)
-        self.on('onSceneCreate', self._on_scene_create_or_update)
-        self.on('onSceneUpdate', self._on_scene_create_or_update)
-        self.on('onSceneDelete', self._on_scene_delete)
-        self.on('onControlCreate', self._on_control_update_or_create)
-        #self.on('onControlUpdate', self._on_control_update_or_create)
-        self.on('onControlDelete', self._on_control_delete)
+        self.on("onParticipantUpdate", self._on_participant_update)
+        self.on('onControlUpdate', self._on_control_update)
         #self.on('giveInput', self._give_input)
 
     @property
@@ -109,15 +105,33 @@ class State(EventEmitter):
         names = [p["username"] for p in packet["participants"]]
         print("[{}] left".format(", ".join(names)))
 
+    def _on_participant_update(self, call):
+        packet = call.data
+        for participant in packet["participants"]:
+            sessionID = participant["sessionID"]
+            del participant["sessionID"]
+            self.participants[sessionID] = participant
+        names = [p["username"] for p in packet["participants"]]
+        print("[{}] was updated".format(", ".join(names)))
+
+    def get_participant(self, name):
+        for p, d in self.participants.items():
+            if p == name or d["username"] == name.lower():
+                result = self.participants[p]
+                result["sessionID"] = p
+                return result
+        print("Participant Not Found")
+        return None
+
     def pump_async(self, loop=asyncio.get_event_loop()):
         """
         Starts a pump() process working in the background. Events will be
         dispatched asynchronously.
-        
+
         Returns a future that can be used for cancelling the pump, if desired.
         Otherwise the pump will automatically stop once
         the connection is closed.
-        
+
         :rtype: asyncio.Future
         """
         self._enable_event_queue = False
@@ -136,12 +150,12 @@ class State(EventEmitter):
         pump causes the state to read any updates it has queued up. This
         should usually be called at the start of any game loop where you're
         going to be doing processing of Interactive events.
-        
+
         Any events that have not been read when pump() is called are discarded.
-        
+
         Alternately, you can call pump_async() to have delivery handled for you
         without manual input.
-        
+
         :rtype: Iterator of Calls
         """
         self._event_queue.clear()
@@ -163,10 +177,38 @@ class State(EventEmitter):
         Scenes can be accessed like self._scenes["default"]
         """
         packet = await self._connection.call("getScenes")
+
         scenes = packet["scenes"]
         for scene in scenes:
             sceneID = scene.pop("sceneID")
             self._scenes[sceneID] = scene
+            return self._scenes
+
+    async def get_scene(self, group=None, username=None, userID=None):
+        await self.get_scenes()
+        groups = await self._connection.call("getGroups")
+        groups = groups["groups"]
+        if group is not None:
+            for g in groups:
+                if g["groupID"] == group:
+                    return g["sceneID"]
+            return None
+        if username is not None:
+            userID = self.get_participant(username)
+            if userID:
+                pass
+            else:
+                print("username was not found in participants: {}".format(username))
+                return None
+        if userID is not None:
+            result = self.participants[userID]
+            result = await self.get_scene(group=result["groupID"])
+            return result
+
+    async def capture(self, tID):
+        await self._connection.call("capture", params={"transactionID": tID})
+
+
 
     async def cooldown(self, sceneID, controlIDs, cooldown):
         """
@@ -239,17 +281,23 @@ class State(EventEmitter):
     def _on_control_update_or_create(self, call):
         if call.data['sceneID'] in self._scenes:
             self._scenes[call.data['sceneID']].\
-                _on_control_update_or_create(call)
+                self._on_control_update_or_create(call)
+
+    def _on_control_update(self, call):
+        data = call.data
+        for c in data["controls"]:
+            ctrlID = c.pop("controlID")
+            self._controls[ctrlID] = c
 
     @staticmethod
     async def connect(discovery=Discovery(), **kwargs):
         """
         Creates a new interactive connection. Most arguments will be passed
         through into the Connection constructor.
-        
-        :param discovery: 
-        :param kwargs: 
-        :return: 
+
+        :param discovery:
+        :param kwargs:
+        :return:
         """
 
         if 'address' not in kwargs:

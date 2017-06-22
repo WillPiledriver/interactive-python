@@ -88,7 +88,9 @@ class Connection:
         self._recv_queue = collections.deque()
         self._recv_await = None
         self._recv_task = None
-        self.print_packets = False
+        self.print_packets = [False, False]
+        self.hold_packets = False
+        self.packets = {}
 
     async def connect(self):
         """
@@ -154,14 +156,25 @@ class Connection:
         """
         Handles a single received packet from the Interactive service.
         """
-
+        if self.hold_packets:
+            temp = data
+            temp["transfer"] = "RCV"
+            if data["id"] not in self.packets:
+                self.packets[data["id"]] = []
+            self.packets[data["id"]].append(temp)
         if data['type'] == 'reply':
             if data['id'] in self._awaiting_replies:
                 if "error" in data:
+
                     print("There was an error: {}".format(json.dumps(data)))
                     self._awaiting_replies[data['id']]. \
                         set_result("error")
                     del self._awaiting_replies[data['id']]
+
+                    if self.hold_packets:
+                        for d in self.packets[data["id"]]:
+                            t = d.pop("transfer")
+                            print("[{}]: {}".format(t, json.dumps(d)))
                 else:
                     self._awaiting_replies[data['id']]. \
                         set_result(data['result'])
@@ -178,8 +191,14 @@ class Connection:
         """
         Encodes and sends a dict payload.
         """
+        if self.hold_packets:
+            temp = payload
+            temp["transfer"] = "SEND"
+            if temp["id"] not in self.packets:
+                self.packets[temp["id"]] = []
+            self.packets[payload["id"]].append(temp)
         j = json.dumps(payload)
-        if self.print_packets:
+        if self.print_packets[1]:
             print("SENT [{}]: {}".format(self._encoding.name(), j))
         await self._socket.send(j)
 
@@ -189,7 +208,7 @@ class Connection:
         """
         try:
             raw_data = await self._socket.recv()
-            if self.print_packets:
+            if self.print_packets[0]:
                 print("RCV: {}".format(raw_data))
         except (asyncio.CancelledError, websockets.ConnectionClosed) as e:
             if self._recv_await is None:
